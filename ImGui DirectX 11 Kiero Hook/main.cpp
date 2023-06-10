@@ -54,7 +54,6 @@ static int TELEPORT_MAP_KEY;
 static int TELEPORT_XHAIR_KEY;
 static int SPEEDHACK_KEY;
 static int MENU_KEY;
-static int QUIT_KEY;
 static bool speedhack_key_pressed = false;
 static bool teleport_xhair_key_pressed = false;
 static bool menu_key_pressed = false;
@@ -230,7 +229,6 @@ char* str_player_friendly = (char*)"PlayerFriendly";
 char* str_player_rogue = (char*)"PlayerRogue";
 char* str_player_blacklisted = (char*)"PlayerBlacklisted";
 char* str_ratio = (char*)"Ratio";
-char* str_quit = (char*)"Quit";
 
 
 const char* CONF_TELEPORT_DST_NAMES[MAX_TELEPORTS] = {
@@ -483,7 +481,7 @@ void cheat_tick(void) {
 
 	int ent_cur = read_memory<int>(obj_ptr + 0x448);
 	if (ent_cur < 1) return;
-	std::cout << "Reading entity array ptr\n";
+	std::cout << "entity array ptr\n";
 	uintptr_t ent_arr = read_memory<uintptr_t>(obj_ptr + 0x440);
 
 	// very important to tell if the current entity number is 0 or game crashes
@@ -493,7 +491,7 @@ void cheat_tick(void) {
 
 	uintptr_t info_ptr1 = read_memory<uintptr_t>(info_ptr0 + 0x28);
 
-	std::cout << "Reading Info array ptr\n";
+	std::cout << "Info array ptr\n";
 	uintptr_t info_arr = read_memory<uintptr_t>(info_ptr1 + 0x78);
 	
 
@@ -509,13 +507,10 @@ void cheat_tick(void) {
 		// get name
 		try {
 			char buf;
-			std::cout << "Reading name: ";
+			std::cout << "name: ";
 			for (int j = 0; j < sizeof(e.name); j++) {
 				buf = read_memory<char>(e.ptr + 0x370 + j);
 				if (buf == 0x0 || buf == 0x25) break;
-				if (!std::isalnum(buf) && buf != '.' && buf != '_' && buf != '-') {
-					throw "Error: Invalid name char %d\n", buf;
-				}
 				std::cout << buf;
 				e.name[j] = buf;
 			}
@@ -542,11 +537,15 @@ void cheat_tick(void) {
 
 		player_n += e.is_player;
 
-		std::cout << "Reading player position\n" << "x: " << e.pos.x << " y: " << e.pos.y << " z: " << e.pos.z << "\n";
+		std::cout << "player position\n";
 		e.pos = read_memory<vec3>(e.ptr + 0x70);
+		std::cout << "x: " << e.pos.x << " y: " << e.pos.y << " z: " << e.pos.z << "\n";
 
 		uintptr_t bone0 = read_memory<uintptr_t>(e.ptr + 0x1D0);
+		if (bone0 == 0) continue;
 		uintptr_t bptr = read_memory<uintptr_t>(bone0 + 0x1460);
+		if (bptr == 0) continue;
+		std::cout << "bone ptr: " << bptr;
 
 		// get skeleton pos
 		{
@@ -875,18 +874,12 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
 			pBackBuffer->Release();
 			oWndProc = (WNDPROC)SetWindowLongPtr(window, GWLP_WNDPROC, (LONG_PTR)WndProc);
 			InitImGui();
-			QUIT_KEY = iniReader.ReadInteger(str_keys, str_quit, 0x0);
 			init = true;
 		}
 
 		else
 			return oPresent(pSwapChain, SyncInterval, Flags);
 
-	}
-
-	if (GetAsyncKeyState(QUIT_KEY)) {
-		kiero::shutdown();
-		return 0;
 	}
 
 	DoStyle();
@@ -1139,14 +1132,13 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
 
 DWORD WINAPI MainThread(LPVOID lpReserved)
 {
-	AllocConsole();
-	HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
-	SMALL_RECT srctWindow = { 0, 0, 80, 25 };
-	SetConsoleWindowInfo(hConsole, TRUE, &srctWindow);
-	FILE* f;
-	freopen_s(&f, "CONOUT$", "w", stdout);
-	std::cout << "Debug information starts:\n";
-
+	// AllocConsole();
+	// HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
+	// SMALL_RECT srctWindow = { 0, 0, 80, 25 };
+	// SetConsoleWindowInfo(hConsole, TRUE, &srctWindow);
+	// FILE* f;
+	// freopen_s(&f, "CONOUT$", "w", stdout);
+	// std::cout << "Debug information starts:\n";
 	bool init_hook = false;
 	do
 	{

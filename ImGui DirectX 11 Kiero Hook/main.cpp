@@ -481,7 +481,7 @@ void cheat_tick(void) {
 
 	int ent_cur = read_memory<int>(obj_ptr + 0x448);
 	if (ent_cur < 1) return;
-	std::cout << "entity array ptr\n";
+	// std::cout << "entity array ptr\n";
 	uintptr_t ent_arr = read_memory<uintptr_t>(obj_ptr + 0x440);
 
 	// very important to tell if the current entity number is 0 or game crashes
@@ -491,7 +491,7 @@ void cheat_tick(void) {
 
 	uintptr_t info_ptr1 = read_memory<uintptr_t>(info_ptr0 + 0x28);
 
-	std::cout << "Info array ptr\n";
+	// std::cout << "Info array ptr\n";
 	uintptr_t info_arr = read_memory<uintptr_t>(info_ptr1 + 0x78);
 	
 
@@ -507,17 +507,17 @@ void cheat_tick(void) {
 		// get name
 		try {
 			char buf;
-			std::cout << "name: ";
+			// std::cout << "name: ";
 			for (int j = 0; j < sizeof(e.name); j++) {
 				buf = read_memory<char>(e.ptr + 0x370 + j);
 				if (buf == 0x0 || buf == 0x25) break;
-				std::cout << buf;
+				// std::cout << buf;
 				e.name[j] = buf;
 			}
-			std::cout << "\n";
+			// std::cout << "\n";
 		}
 		catch (const char* msg) {
-			std::cout << msg;
+			// std::cout << msg;
 			e.name[0] = 0x3F; e.name[1] = 0x0;
 		}
 

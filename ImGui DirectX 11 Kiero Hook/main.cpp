@@ -11,16 +11,23 @@
 #include "IniReader.h"
 #include "XorStr.hpp"
 #include "speedhack.h"
+#include "global.h"
 #include <iostream>
 #include <winuser.h>
+#include <thread>
 #include <vector>
 #include <string>
+#include <Windows.h>
+#include <tlhelp32.h>
+#include <psapi.h>
+#pragma comment(lib, "psapi.lib")
 
 
 // Credential goes to https://www.codeproject.com/Articles/10809/A-Small-Class-to-Read-INI-File
 // IniWriter and IniReader by Xiangxiong Jian
 // licensed under The Code Project Open License (CPOL)
 
+LPVOID lpRemain = nullptr;
 
 extern LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
@@ -33,6 +40,7 @@ ID3D11RenderTargetView* mainRenderTargetView;
 
 CIniWriter iniWriter((char*)CONFIG_PATH);
 CIniReader iniReader((char*)CONFIG_PATH);
+
 
 static float res_x, res_y;
 static bool G_ESP;
@@ -49,6 +57,8 @@ static bool G_RPM;
 static bool G_Teleport;
 static bool G_Health;
 static bool G_Speedhack;
+static bool G_Aimbot;
+static bool G_Noclip;
 static bool show_menu = true;
 static int TELEPORT_MAP_KEY;
 static int TELEPORT_XHAIR_KEY;
@@ -75,6 +85,7 @@ static vec3 tmp = { -1, -1, -1 };
 
 
 static float value_RPM = 66666.f;
+static float value_AIMBOT = 300.f;
 static float value_Speedhack;
 static bool g_is_init = false;
 static bool init = false;
@@ -201,9 +212,8 @@ LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
 
 typedef struct entity {
 	uintptr_t ptr;
-	bool is_gadget, is_human, is_rogue, is_player, is_friendly;
+	bool is_gadget, is_human, is_rogue, is_player, is_friendly, is_dead;
 	int level, hp_cur, hp_max;
-
 	vec3 pos, torso, belly, head, neck;
 	vec3 left_foot, left_thigh, left_knee, left_shoulder, left_elbow, left_hand;
 	vec3 right_foot, right_thigh, right_knee, right_shoulder, right_elbow, right_hand;
@@ -321,7 +331,7 @@ ImVec2 w2s(vec3 pos, mat4 world, float hx, float hy) {
 	float w = vec3_dot(tv, pos) + world._44;
 
 	if (w < -1.f) {
-		return ImVec2(0, 0);
+		return ImVec2(9999, 9999);
 	}
 
 	float x = (vec3_dot(ri, pos) + world._14);
@@ -346,6 +356,39 @@ void stringsplit(const char* str, const std::string& split, std::vector<std::str
 	delete[] strc;
 }
 
+static int ent_n;
+LPVOID findAddressToInject(DWORD_PTR startAddress, DWORD_PTR endAddress, DWORD dwSize) {
+	MEMORY_BASIC_INFORMATION mbi;
+	HANDLE hProcess = GetCurrentProcess();
+	while (startAddress < endAddress)
+	{
+		if (VirtualQueryEx(hProcess, (LPVOID)startAddress, &mbi, sizeof(mbi)) == sizeof(mbi))
+		{
+			if (mbi.State == MEM_COMMIT && mbi.Protect != PAGE_EXECUTE_READWRITE)
+			{
+				DWORD oldProtect;
+				if (VirtualProtectEx(hProcess, mbi.BaseAddress, dwSize, PAGE_EXECUTE_READWRITE, &oldProtect))
+				{
+					// std::cout << "Address found to hook: " << mbi.BaseAddress << std::endl;
+					return (LPVOID)mbi.BaseAddress;
+				}
+			}
+			startAddress = (DWORD_PTR)mbi.BaseAddress + mbi.RegionSize;
+		}
+		else
+		{
+			startAddress += 0x1000;
+		}
+	}
+	return 0;
+}
+
+void writeJmpOffset2ShellCode(BYTE* shellcode, uint32_t offset, size_t offsetIndex) {
+	shellcode[offsetIndex + 0] = (offset >> 0) & 0xFF;
+	shellcode[offsetIndex + 1] = (offset >> 8) & 0xFF;
+	shellcode[offsetIndex + 2] = (offset >> 16) & 0xFF;
+	shellcode[offsetIndex + 3] = (offset >> 24) & 0xFF;
+}
 
 static bool game_init(void) {
 
@@ -356,7 +399,7 @@ static bool game_init(void) {
 	if (g_base_ptr == 0) {
 		return false;
 	}
-	
+
 	try {
 		G_ESP = iniReader.ReadBoolean(str_settings, (char*)"ESP", true);
 		G_Box_npc = iniReader.ReadBoolean(str_settings, (char*)"Box_npc", true);
@@ -424,19 +467,78 @@ static bool game_init(void) {
 
 	Speedhack::Setup();
 
+	HANDLE hProcess = GetCurrentProcess();
+	DWORD dwSize = sizeof(fakeLookAtFunc);
+	// DWORD_PTR startAddress = (DWORD_PTR)g_base_ptr - 0xEF6A0000;
+	// DWORD_PTR endAddress = (DWORD_PTR)g_base_ptr;
+	// LPVOID targetAddr = findAddressToInject(startAddress, endAddress, dwSize);
+	// LPVOID targetAddr = VirtualAllocEx(hProcess, tmp + 0x10000000, dwSize, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+	DWORD oldProtect;
+	LPVOID targetAddr = (LPVOID)(g_base_ptr + 0x451);
+	BOOL res = VirtualProtectEx(hProcess, targetAddr, dwSize, PAGE_EXECUTE_READWRITE, &oldProtect);
+	if (!res) { 
+		// std::cout << "Failed to find address to inject, restart game " << std::endl;
+		return false;
+	}
+	// if (targetAddr == 0) { std::cout << "Failed to find address to inject, restart game " << std::endl; }
+	else {
+		writeJmpOffset2ShellCode(fakeLookAtFunc, g_base_ptr + 0x1057080 - ((size_t)targetAddr + 0xA), 0x6);
+		writeJmpOffset2ShellCode(fakeLookAtFunc, g_base_ptr + 0x19C7865 - ((size_t)targetAddr + 0x26), 0x22);
+		// std::cout << "Start injecting fake LookAt func ..." << std::endl;
+		WriteProcessMemory(hProcess, targetAddr, fakeLookAtFunc, sizeof(fakeLookAtFunc), NULL);
+		// std::cout << "Injected" << std::endl;
+
+		// std::cout << "Start hooking fake LookAt func ..." << std::endl;
+		PDETOUR_TRAMPOLINE lpTrampolineData = {};
+		const auto hookPoint0 = (LPVOID)((DWORD_PTR)targetAddr + 0x0);
+
+		DetourTransactionBegin();
+		DetourUpdateThread(GetCurrentThread());
+		DetourAttachEx((PVOID*)&hookPoint0, (PVOID)&hkFunction, &lpTrampolineData, nullptr, nullptr);
+		DetourTransactionCommit();
+
+		const auto lpDetourInfo = (DETOUR_INFO*)lpTrampolineData;
+		lpRemain = lpDetourInfo->pbRemain;
+
+		// std::cout << "Hooked" << std::endl;
+
+		LPVOID lookAtFuncPtr = (LPVOID)(g_base_ptr + 0x3339FF0);
+		DWORD oldProtect;
+		BOOL res0 = VirtualProtectEx(hProcess, lookAtFuncPtr, 8, PAGE_EXECUTE_READWRITE, &oldProtect);
+		if (!res0) {
+			// std::cout << "Failed to overwrite fake LookAt func" << std::endl;
+			return false;
+		}
+		else {
+			write_memory<LPVOID>((uintptr_t)lookAtFuncPtr, targetAddr);
+			// std::cout << "Overwrite fake LookAt func" << std::endl;
+			LPVOID fullAutoWrapperPtr = (LPVOID)(g_base_ptr + 0x32F85A0);
+			BOOL res1 = VirtualProtectEx(hProcess, fullAutoWrapperPtr, 8, PAGE_EXECUTE_READWRITE, &oldProtect);
+			if (!res1) {
+				// std::cout << "Failed to overwrite fake fullAutoWrapper func" << std::endl;
+				return false;
+			}
+			else {
+				LPVOID targetAddr2 = static_cast<LPVOID>(static_cast<LPBYTE>(targetAddr) + 0xC);
+				write_memory<LPVOID>((uintptr_t)fullAutoWrapperPtr, targetAddr2);
+				// std::cout << "Overwrite fake fullAutoWrapper func" << std::endl;
+			}
+		}
+	}
+
+
 	res_x = ImGui::GetIO().DisplaySize.x;
 	res_y = ImGui::GetIO().DisplaySize.y;
-	// Find the index module.
-	// RecoilBaseFinal
-	// "TheDivision.exe"+03D879B8 -> 348 -> 98 -> 2c0 -> 0
 
 	g_is_init = true;
 
 	return true;
 }
 
-
 constexpr int COLUMN_OFFSET = 200;
+static bool should_aimbot = false;
+vec3 aimbot;
+char aname[16];
 void cheat_tick(void) {
 
 	if (g_is_init == false) {
@@ -457,7 +559,6 @@ void cheat_tick(void) {
 	else {
 		Speedhack::SetSpeed(1.f);
 	}
-
 
 	mat4 world = mat4_transpose(read_memory<mat4>(g_base_ptr + OFF_VIEWMATRIX));
 	float hx = res_x / 2.0f;
@@ -487,6 +588,7 @@ void cheat_tick(void) {
 	// very important to tell if the current entity number is 0 or game crashes
 	uintptr_t player_ptr = read_memory<uintptr_t>(ent_arr + 0x0);
 	if (player_ptr != player_ptr || player_ptr == 0) return;
+
 	uintptr_t info_ptr0 = read_memory<uintptr_t>(player_ptr + 0x528);
 
 	uintptr_t info_ptr1 = read_memory<uintptr_t>(info_ptr0 + 0x28);
@@ -497,7 +599,7 @@ void cheat_tick(void) {
 
 	ent_cur = ent_cur < MAX_ENTITIES ? ent_cur : MAX_ENTITIES;
 
-	int ent_n = 0;
+	ent_n = 0;
 	int player_n = 0;
 
 	for (int i = 0; i < ent_cur; i++) {
@@ -525,6 +627,7 @@ void cheat_tick(void) {
 		{
 			e.level = read_memory<int>(e.ptr + 0x3D0);
 			// e.type = read_memory<char>(e.ptr + 0x3A4);
+			e.is_dead = read_memory<byte>(e.ptr + 0x1C0) == 1;
 			e.is_player = read_memory<byte>(e.ptr + 0x3A4) == 1;
 			e.is_gadget = read_memory<byte>(e.ptr + 0x354) == 1;
 			e.is_human = read_memory<byte>(e.ptr + 0x400) == 1;
@@ -537,15 +640,15 @@ void cheat_tick(void) {
 
 		player_n += e.is_player;
 
-		std::cout << "player position\n";
+		// std::cout << "player position\n";
 		e.pos = read_memory<vec3>(e.ptr + 0x70);
-		std::cout << "x: " << e.pos.x << " y: " << e.pos.y << " z: " << e.pos.z << "\n";
+		// std::cout << "x: " << e.pos.x << " y: " << e.pos.y << " z: " << e.pos.z << "\n";
 
 		uintptr_t bone0 = read_memory<uintptr_t>(e.ptr + 0x1D0);
 		if (bone0 == 0) continue;
 		uintptr_t bptr = read_memory<uintptr_t>(bone0 + 0x1460);
 		if (bptr == 0) continue;
-		std::cout << "bone ptr: " << bptr;
+		// std::cout << "bone ptr: " << bptr;
 
 		// get skeleton pos
 		{
@@ -591,46 +694,63 @@ void cheat_tick(void) {
 	}
 
 	auto draw = ImGui::GetBackgroundDrawList();
+	float min_dist = (hx + hy) * 2;
+	ImVec2 xhair = { hx, hy };
+	should_aimbot = false;
+	for (int i = 0; i < ent_n; i++) {
 
-	if (G_ESP) {
-		for (int i = 0; i < ent_n; i++) {
+		if (i == 0) continue;
 
-			if (i == 0) continue;
+		entity e = entitylist[i];
 
-			entity e = entitylist[i];
+		ImVec2 head_pos = w2s(e.head, world, hx, hy);
+		ImVec2 neck_pos = w2s(e.neck, world, hx, hy);
+		ImVec2 torso_pos = w2s(e.torso, world, hx, hy);
+		ImVec2 belly_pos = w2s(e.belly, world, hx, hy);
 
-			ImVec2 head_pos = w2s(e.head, world, hx, hy);
-			ImVec2 neck_pos = w2s(e.neck, world, hx, hy);
-			ImVec2 torso_pos = w2s(e.torso, world, hx, hy);
-			ImVec2 belly_pos = w2s(e.belly, world, hx, hy);
+		ImVec2 left_shoulder_pos = w2s(e.left_shoulder, world, hx, hy);
+		ImVec2 left_elbow_pos = w2s(e.left_elbow, world, hx, hy);
+		ImVec2 left_hand_pos = w2s(e.left_hand, world, hx, hy);
+		ImVec2 left_thigh_pos = w2s(e.left_thigh, world, hx, hy);
+		ImVec2 left_knee_pos = w2s(e.left_knee, world, hx, hy);
+		ImVec2 left_foot_pos = w2s(e.left_foot, world, hx, hy);
 
-			ImVec2 left_shoulder_pos = w2s(e.left_shoulder, world, hx, hy);
-			ImVec2 left_elbow_pos = w2s(e.left_elbow, world, hx, hy);
-			ImVec2 left_hand_pos = w2s(e.left_hand, world, hx, hy);
-			ImVec2 left_thigh_pos = w2s(e.left_thigh, world, hx, hy);
-			ImVec2 left_knee_pos = w2s(e.left_knee, world, hx, hy);
-			ImVec2 left_foot_pos = w2s(e.left_foot, world, hx, hy);
+		ImVec2 right_shoulder_pos = w2s(e.right_shoulder, world, hx, hy);
+		ImVec2 right_elbow_pos = w2s(e.right_elbow, world, hx, hy);
+		ImVec2 right_hand_pos = w2s(e.right_hand, world, hx, hy);
+		ImVec2 right_thigh_pos = w2s(e.right_thigh, world, hx, hy);
+		ImVec2 right_knee_pos = w2s(e.right_knee, world, hx, hy);
+		ImVec2 right_foot_pos = w2s(e.right_foot, world, hx, hy);
 
-			ImVec2 right_shoulder_pos = w2s(e.right_shoulder, world, hx, hy);
-			ImVec2 right_elbow_pos = w2s(e.right_elbow, world, hx, hy);
-			ImVec2 right_hand_pos = w2s(e.right_hand, world, hx, hy);
-			ImVec2 right_thigh_pos = w2s(e.right_thigh, world, hx, hy);
-			ImVec2 right_knee_pos = w2s(e.right_knee, world, hx, hy);
-			ImVec2 right_foot_pos = w2s(e.right_foot, world, hx, hy);
+		ImVec2 screen_top = w2s(vec3_set(e.head.x, e.head.y + 0.25f, e.head.z), world, hx, hy);
+		ImVec2 left_bottom = w2s(vec3_set(e.left_foot.x, e.left_foot.y - 0.25f, e.left_foot.z), world, hx, hy);
+		ImVec2 right_bottom = w2s(vec3_set(e.right_foot.x, e.right_foot.y - 0.25f, e.right_foot.z), world, hx, hy);
+		ImVec2 screen_bot = ImVec2((left_bottom.x + right_bottom.x) * 0.5f, left_bottom.y < right_bottom.y ? left_bottom.y : right_bottom.y);
 
-			ImVec2 screen_top = w2s(vec3_set(e.head.x, e.head.y + 0.25f, e.head.z), world, hx, hy);
-			ImVec2 left_bottom = w2s(vec3_set(e.left_foot.x, e.left_foot.y - 0.25f, e.left_foot.z), world, hx, hy);
-			ImVec2 right_bottom = w2s(vec3_set(e.right_foot.x, e.right_foot.y - 0.25f, e.right_foot.z), world, hx, hy);
-			ImVec2 screen_bot = ImVec2((left_bottom.x + right_bottom.x) * 0.5f, left_bottom.y < right_bottom.y ? left_bottom.y : right_bottom.y);
+		float y = screen_top.y;
+		float h = screen_bot.y - screen_top.y;
+		float w = h * 0.5f;
+		float x = screen_top.x - w * 0.5f;
 
-			float y = screen_top.y;
-			float h = screen_bot.y - screen_top.y;
-			float w = h * 0.5f;
-			float x = screen_top.x - w * 0.5f;
-
-			if (h < 1.0 || (x <= 0 && screen_top.y <= 0)) {
-				continue;
+		if (h < 1.0 || (x <= 0 && screen_top.y <= 0)) {
+			continue;
+		}
+		
+		if (G_Aimbot) {
+			float tmp = sqrtf(((head_pos.x - hx) * (head_pos.x - hx)) + ((head_pos.y - hy) * (head_pos.y - hy)));
+			if (tmp < min_dist && !e.is_dead && (e.is_player || !e.is_friendly)) {
+				min_dist = tmp;
+				vec3 skeleton = e.head;
+				aimbot.x = skeleton.x;
+				aimbot.y = skeleton.y + 0.035f; // aim a bit higher than head
+				aimbot.z = skeleton.z;
+				should_aimbot = true;
+				memcpy(aname, e.name, sizeof(e.name));
+				// std::cout << e.name << " " << tmp << std::endl;
 			}
+		}
+
+		if (G_ESP) {
 
 			ImColor color(0, 0, 0);
 			if (e.is_player) {
@@ -707,11 +827,13 @@ void cheat_tick(void) {
 				draw->AddLine(screen_bot, ImVec2((float)res_x / 2, res_y), color);
 			}
 		}
-
 	}
 
+	// if (G_Aimbot) {
+	//     draw->AddCircle(xhair, value_AIMBOT, ImColor(250, 250, 250));
+	// }
+
 	if (GetForegroundWindow() != FindWindowA(NULL, "Tom Clancy's The Division")) return;
-	
 
 	if (G_RPM) {
 		set_index_val(info_arr, RPM, value_RPM);
@@ -756,7 +878,7 @@ void cheat_tick(void) {
 		set_index_val(info_arr, SpreadMovementMod, 0.f);
 		set_index_val(info_arr, SpreadIncreaseSpeed, 0.f);
 		set_index_val(info_arr, SpreadIncreaseTimeMS, 0.f);
-		// set_index_val(info_arr, SpreadReductionSpeed, 999.f);
+		set_index_val(info_arr, SpreadReductionSpeed, 999.f);
 	}
 
 	if (G_Reload) {
@@ -781,11 +903,10 @@ void cheat_tick(void) {
 
 
 		if (GetAsyncKeyState(TELEPORT_XHAIR_KEY) < 0 && !teleport_xhair_key_pressed) {
-
+			
 			uintptr_t xhair_ptr = read_memory<uintptr_t>(player_ptr + 0x630);
 			if (xhair_ptr == 0) return;
 			vec3 TraceEnd = read_memory<vec3>(xhair_ptr + 0x31EC);
-
 			write_memory<vec3>(pos_ptr + OFF_WARP_POS, TraceEnd);
 
 			teleport_xhair_key_pressed = true;
@@ -855,6 +976,33 @@ void cheat_tick(void) {
 }
 
 
+extern "C" void aimbotFunc() {
+	if (G_Aimbot && should_aimbot) {
+		uintptr_t rlc_ptr = read_memory<uintptr_t>(g_base_ptr + OFF_RLCLIENT);
+		uintptr_t wrd_ptr = read_memory<uintptr_t>(rlc_ptr + 0x120);
+		uintptr_t obj_ptr = read_memory<uintptr_t>(wrd_ptr + 0x28);
+		int ent_cur = read_memory<int>(obj_ptr + 0x448);
+		if (ent_cur < 1) return;
+		// std::cout << "entity array ptr\n";
+		uintptr_t ent_arr = read_memory<uintptr_t>(obj_ptr + 0x440);
+
+		// very important to tell if the current entity number is 0 or game crashes
+		uintptr_t player_ptr = read_memory<uintptr_t>(ent_arr + 0x0);
+		if (player_ptr != player_ptr || player_ptr == 0) return;
+
+		uintptr_t TraceEnd = read_memory<uintptr_t>(player_ptr + 0x630);
+		uintptr_t xhair = TraceEnd + 0x31EC;
+
+		if (TraceEnd != 0) {
+			write_memory<vec3>(xhair, aimbot);
+			// std::cout << "Aimbot on " << aname << " @ " << aimbot.x << " " << aimbot.y << " " << aimbot.z << std::endl;
+		}
+		else {
+			// std::cout << "[X] invalid TraceEnd ptr" << std::endl;
+		}
+	
+	}
+}
 
 HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags)
 {
@@ -899,7 +1047,7 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
 
 	if (show_menu) {
 		
-		ImGui::Begin("Envia", nullptr, ImGuiWindowFlags_NoResize);
+		ImGui::Begin(xor ( "Envia" ), nullptr, ImGuiWindowFlags_NoResize);
 
 		ImGui::Columns(2);
 		ImGui::SetColumnOffset(1, COLUMN_OFFSET);
@@ -909,7 +1057,7 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
 		if (!g_is_init) {
 			if (game_init() == false) {
 				ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 0, 0, 255));
-				char* text = (char*)"Failed to init";
+				char* text = (char*)xor ( "Failed to init" );
 				ImGui::SetCursorPosX(((float)COLUMN_OFFSET - ImGui::CalcTextSize(text).x) * 0.5f);
 				ImGui::Text(text);
 				ImGui::PopStyleColor();
@@ -917,25 +1065,25 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
 		}
 		else {
 			ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 204, 51, 255));
-			char* text = (char*)"Game module initialized";
+			char* text = (char*)xor ( "Game module initialized" );
 			ImGui::SetCursorPosX(((float)COLUMN_OFFSET - ImGui::CalcTextSize(text).x) * 0.5f);
 			ImGui::Text(text);
 			ImGui::PopStyleColor();
 
 			ImGui::Spacing();
-			if (ImGui::Button("Weapon", ImVec2(COLUMN_OFFSET - 30, 40)))
+			if (ImGui::Button(xor ( "Weapon" ), ImVec2(COLUMN_OFFSET - 30, 40)))
 				tab = 1;
 
 			ImGui::Spacing();
-			if (ImGui::Button("ESP", ImVec2(COLUMN_OFFSET - 30, 40)))
+			if (ImGui::Button(xor ( "ESP" ), ImVec2(COLUMN_OFFSET - 30, 40)))
 				tab = 2;
 
 			ImGui::Spacing();
-			if (ImGui::Button("Teleport", ImVec2(COLUMN_OFFSET - 30, 40)))
+			if (ImGui::Button(xor ( "Teleport" ), ImVec2(COLUMN_OFFSET - 30, 40)))
 				tab = 3;
 
 			ImGui::Spacing();
-			if (ImGui::Button("Misc", ImVec2(COLUMN_OFFSET - 30, 40)))
+			if (ImGui::Button(xor ( "Misc" ), ImVec2(COLUMN_OFFSET - 30, 40)))
 				tab = 4;
 
 			// float res_x = , res_y = ImGui::GetIO().DisplaySize.y;
@@ -947,44 +1095,58 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
 			if (g_is_init) {
 				switch (tab) {
 				case 1:
-					ImGui::Text("Handling");
+					ImGui::Text(xor ( "Handling" ));
 
 					ImGui::Checkbox("Recoil + Sway", &G_Recoil);
-					ImGui::Checkbox("Spread", &G_Spread);
-					ImGui::Checkbox("Reload", &G_Reload);
-					ImGui::Text("Attributes");
+					ImGui::Checkbox(xor ( "Spread" ), &G_Spread);
+					ImGui::Checkbox(xor ( "Reload" ), &G_Reload);
+					ImGui::Text(xor ( "Attributes" ));
 
-					ImGui::Checkbox("RPM", &G_RPM);
+					ImGui::Checkbox(xor ( "RPM" ), &G_RPM);
 					if (G_RPM) {
 						ImGui::SameLine();
-						ImGui::SliderFloat("value", &value_RPM, 1000.f, 500000.f);
+						ImGui::SliderFloat(xor ( "value" ), &value_RPM, 1000.f, 500000.f);
 					}
+
+					ImGui::Checkbox(xor ( "Aimbot" ), &G_Aimbot);
+					if (G_Aimbot) {
+						ImGui::SameLine();
+						ImGui::SliderFloat(xor ( "radius" ), &value_AIMBOT, 1.f, 1000.f);
+					}
+
+					if (ImGui::Checkbox(xor ("Noclip"), &G_Noclip)) {
+						if (G_Noclip) {
+							write_memory<UINT>(g_base_ptr + 0x3E8B5F0, 0x00002304);
+							write_memory<UINT>(g_base_ptr + 0x3E8B830, 0x00000004);
+						}
+					}
+
 					break;
 				case 2:
-					ImGui::Text("Visuals");
+					ImGui::Text(xor ( "Visuals" ));
 
-					ImGui::Checkbox("Enable ESP", &G_ESP);
+					ImGui::Checkbox(xor ( "Enable ESP" ), &G_ESP);
 
-					ImGui::Checkbox("Health", &G_Health);
-					if (ImGui::CollapsingHeader("Bounding box")) {
-						ImGui::Checkbox("Player box", &G_Box_player);
-						ImGui::Checkbox("NPC box", &G_Box_npc);
+					ImGui::Checkbox(xor ( "Health" ), &G_Health);
+					if (ImGui::CollapsingHeader(xor ( "Bounding box" ))) {
+						ImGui::Checkbox(xor ( "Player box" ), &G_Box_player);
+						ImGui::Checkbox(xor ( "NPC box" ), &G_Box_npc);
 					}
-					if (ImGui::CollapsingHeader("Skeleton"))
+					if (ImGui::CollapsingHeader(xor ( "Skeleton" )))
 					{
-						ImGui::Checkbox("Player skeleton", &G_Skeleton_player);
-						ImGui::Checkbox("NPC skeleton", &G_Skeleton_npc);
+						ImGui::Checkbox(xor ( "Player skeleton" ), &G_Skeleton_player);
+						ImGui::Checkbox(xor ( "NPC skeleton" ), &G_Skeleton_npc);
 
 					}
-					if (ImGui::CollapsingHeader("Snapline")) {
-						ImGui::Checkbox("Player snapline", &G_Snapline_player);
-						ImGui::Checkbox("NPC snapline", &G_Snapline_npc);
+					if (ImGui::CollapsingHeader(xor ( "Snapline" ))) {
+						ImGui::Checkbox(xor ( "Player snapline" ), &G_Snapline_player);
+						ImGui::Checkbox(xor ( "NPC snapline" ), &G_Snapline_npc);
 					}
 					break;
 				case 3:
-					ImGui::Text("Teleport");
+					ImGui::Text(xor ( "Teleport" ));
 
-					ImGui::Checkbox("Enable", &G_Teleport);
+					ImGui::Checkbox(xor ( "Enable" ), &G_Teleport);
 					ImGui::Spacing();
 					ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 153, 18, 255));
 					ImGui::SameLine();
@@ -992,11 +1154,11 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
 					ImGui::PopStyleColor();
 					ImGui::Spacing();
 					ImGui::Text("Current Coords: %s", TELEPORT_PLAYER_CURRENT_COORDS);
-					if (ImGui::Button("Copy to clipboard")) {
+					if (ImGui::Button(xor ( "Copy to clipboard" ))) {
 						toClipboard(TELEPORT_PLAYER_CURRENT_COORDS);
 					}
 
-					if (ImGui::BeginMenu("Load Position")) {
+					if (ImGui::BeginMenu(xor ( "Load Position" ))) {
 						for (int i = 0; i < MAX_TELEPORTS; i++) {
 							char* key = get_vk_name(warps[i].key);
 							if (strcmp(key, "?") == 0) continue;
@@ -1007,13 +1169,13 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
 						ImGui::EndMenu();
 					}
 
-					if (ImGui::BeginMenu("Save Position")) {
+					if (ImGui::BeginMenu(xor ( "Save Position" ))) {
 						for (int i = 0; i < MAX_TELEPORTS; i++) {
 							char* key = get_vk_name(warps[i].key);
 							if (strcmp(key, "?") == 0) continue;
 							if (ImGui::Button(key)) {
 								try {
-									iniWriter.WriteString((char*)"Teleports", (char*)CONF_TELEPORT_DST_NAMES[i], TELEPORT_PLAYER_CURRENT_COORDS);
+									iniWriter.WriteString((char*)xor ( "Teleports" ), (char*)CONF_TELEPORT_DST_NAMES[i], TELEPORT_PLAYER_CURRENT_COORDS);
 								}
 								catch (...) {}
 							}
@@ -1025,9 +1187,9 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
 
 				case 4:
 
-					ImGui::Text("Blacklist & whitelist");
+					ImGui::Text(xor ( "Blacklist & whitelist" ));
 
-					if (ImGui::Button("Update")) {
+					if (ImGui::Button(xor ( "Update" ))) {
 						try {
 							char* blist = (char*)iniReader.ReadString(str_lists, str_blacklist, "");
 							stringsplit(blist, "|", blacklist);
@@ -1038,13 +1200,13 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
 						catch (...) {
 							ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 0, 0, 255));
 							ImGui::SameLine();
-							ImGui::Text("Update failed");
+							ImGui::Text(xor ( "Update failed" ));
 							ImGui::PopStyleColor();
 						}
 					}
-					ImGui::Text("Settings");
+					ImGui::Text(xor ( "Settings" ));
 
-					if (ImGui::Button("Save Settings")) {
+					if (ImGui::Button(xor ( "Save Settings" ))) {
 						try {
 							iniWriter.WriteBoolean(str_settings, (char*)"ESP", G_ESP);
 							iniWriter.WriteBoolean(str_settings, (char*)"Box_npc", G_Box_npc);
@@ -1064,22 +1226,22 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
 						catch (...) {
 							ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 0, 0, 255));
 							ImGui::SameLine();
-							ImGui::Text("Save settings failed");
+							ImGui::Text(xor ( "Save settings failed" ));
 							ImGui::PopStyleColor();
 						}
 					}
 
 					ImGui::Spacing();
-					if (ImGui::BeginMenu("Colors")) {
-						ImGui::ColorEdit4("NPC friendly", (float*)&color_npc_friendly);
-						ImGui::ColorEdit4("NPC hostile", (float*)&color_npc_hostile);
-						ImGui::ColorEdit4("Player friendly", (float*)&color_player_friendly);
-						ImGui::ColorEdit4("Player rogue", (float*)&color_player_rogue);
-						ImGui::ColorEdit4("Player blacklisted", (float*)&color_player_blacklisted);
+					if (ImGui::BeginMenu(xor ( "Colors" ))) {
+						ImGui::ColorEdit4(xor ( "NPC friendly" ), (float*)&color_npc_friendly);
+						ImGui::ColorEdit4(xor ( "NPC hostile" ), (float*)&color_npc_hostile);
+						ImGui::ColorEdit4(xor ( "Player friendly" ), (float*)&color_player_friendly);
+						ImGui::ColorEdit4(xor ( "Player rogue" ), (float*)&color_player_rogue);
+						ImGui::ColorEdit4(xor ( "Player blacklisted" ), (float*)&color_player_blacklisted);
 						ImGui::EndMenu();
 					}
 
-					if (ImGui::Button("Save Colors")) {
+					if (ImGui::Button(xor ( "Save Colors" ))) {
 						try {
 							iniWriter.WriteInteger(str_colors, str_npc_friendly, color_npc_friendly);
 							iniWriter.WriteInteger(str_colors, str_npc_hostile, color_npc_hostile);
@@ -1090,13 +1252,13 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
 						catch (...) {
 							ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 0, 0, 255));
 							ImGui::SameLine();
-							ImGui::Text("Save colors failed");
+							ImGui::Text(xor ( "Save colors failed" ));
 							ImGui::PopStyleColor();
 						}
 					}
 
 					ImGui::Checkbox(str_speedhack, &G_Speedhack);
-					ImGui::SliderFloat("Ratio", &value_Speedhack, 0.125f, 64.f);
+					ImGui::SliderFloat(xor ( "Ratio" ), &value_Speedhack, 0.125f, 64.f);
 					break;
 
 				default:
@@ -1125,20 +1287,18 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
 	pContext->OMSetRenderTargets(1, &mainRenderTargetView, NULL);
 	ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
 
-
-
 	return oPresent(pSwapChain, SyncInterval, Flags);
 }
 
 DWORD WINAPI MainThread(LPVOID lpReserved)
 {
 	// AllocConsole();
-	// HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
-	// SMALL_RECT srctWindow = { 0, 0, 80, 25 };
-	// SetConsoleWindowInfo(hConsole, TRUE, &srctWindow);
 	// FILE* f;
 	// freopen_s(&f, "CONOUT$", "w", stdout);
 	// std::cout << "Debug information starts:\n";
+
+	// SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+
 	bool init_hook = false;
 	do
 	{

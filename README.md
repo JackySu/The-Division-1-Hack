@@ -13,6 +13,7 @@ It serves as the epitaph for "The Division", a game that was once filled with gr
 This repository is based on the work of [Kiero Hook](https://github.com/rdbo/ImGui-DirectX-11-Kiero-Hook).
 
 # Known issues
-The code is shit I know I didn't intend to publish this repo in the first place, but wake the fuck up Samurai we have a city to burn.
+Wake the fuck up Samurai we have a city to burn.
 
-The code includes everything it goes but the aimbot, surely you know how to hook the firing function and overwrite the coord of TraceEnd object.
+# Update
+- Add aimbot working to hook the entry point of firing function
